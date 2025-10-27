@@ -123,17 +123,22 @@ def check_rate_limit(user_id: str) -> tuple[bool, str]:
     return True, "OK"
 
 
-def authenticate_user(headers: dict) -> Optional[str]:
+def authenticate_user(websocket) -> Optional[str]:
     """
-    Authenticate user from WebSocket headers.
+    Authenticate user from WebSocket connection.
     In production, replace this with your actual authentication:
     - JWT token validation
     - OAuth2 bearer tokens
     - API key validation
     - Session cookie validation
     """
-    # Example: Extract authorization header
-    auth_header = headers.get('Authorization', '')
+    # Extract authorization header from websocket request
+    # In websockets 12.0+, headers are accessed differently
+    try:
+        auth_header = websocket.request.headers.get('Authorization', '')
+    except AttributeError:
+        # Fallback for older versions or if headers not available
+        auth_header = ''
     
     # For demo purposes, accept any authorization or create anonymous user
     if auth_header.startswith('Bearer '):
@@ -183,14 +188,14 @@ async def proxy_azure_to_client(azure_ws, client_ws, session_id: str):
         logger.error(f"Error proxying Azure to client: {e}")
 
 
-async def handle_client_connection(websocket, path):
+async def handle_client_connection(websocket):
     """Handle incoming WebSocket connection from client browser"""
     session_id = None
     azure_ws = None
     
     try:
         # Authenticate user
-        user_id = authenticate_user(websocket.request_headers)
+        user_id = authenticate_user(websocket)
         if not user_id:
             await websocket.close(1008, "Authentication failed")
             return
@@ -214,12 +219,10 @@ async def handle_client_connection(websocket, path):
         
         async with websockets.connect(
             azure_url,
-            extra_headers={
-                'User-Agent': 'Realtime-Voice-Bot/1.0'
-            },
             max_size=10 * 1024 * 1024,  # 10MB max message size
             ping_interval=20,
-            ping_timeout=20
+            ping_timeout=20,
+            user_agent_header='Realtime-Voice-Bot/1.0'
         ) as azure_ws:
             sessions[session_id]['azure_ws'] = azure_ws
             logger.info(f"✓ Connected to Azure for session {session_id[:8]}")
@@ -231,12 +234,13 @@ async def handle_client_connection(websocket, path):
                 return_exceptions=True
             )
     
-    except websockets.exceptions.InvalidStatusCode as e:
-        logger.error(f"Azure connection failed: {e.status_code}")
+    except websockets.exceptions.WebSocketException as e:
+        # Catch all websocket exceptions (replaces deprecated InvalidStatusCode)
+        logger.error(f"Azure connection failed: {e}")
         try:
             await websocket.send(json.dumps({
                 'type': 'error',
-                'error': f'Failed to connect to Azure: {e.status_code}'
+                'error': f'Failed to connect to Azure: {str(e)}'
             }))
         except:
             pass
